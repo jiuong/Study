@@ -1,81 +1,118 @@
 """
 历史回测复盘
 """
-import pickle
-from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 from keras.models import load_model, Sequential
-from config import SPREAD, SLIPPAGE, FEATURES
+from config import (
+  SPREAD, SLIPPAGE, FEATURES
+)
 from data_loader import process_full
 from args import TrainArgs, get_args
 from tqdm import tqdm
 
+from scaler import get_scaler
+from trade_stregety.args import TradeArgs, get_trade_args, print_trade_args
+from train import get_model_url
+
 class BacktestResult:
     def __init__(
         self,
-        total: int,
-        profit: float,
-        win_rate: float,
-        max_consec_loss: int,
-        max_drawdown: float,
-        real_profit_loss_ratio: float
+        total: int = 0,
+        profit: float = 0,
+        win_rate: float = 0,
+        max_consec_loss: int = 0,
+        max_drawdown: float = 0,
+        max_loss_count: int = 0,
+        real_profit_loss_ratio: float = 0,
     ):
         self.total = total
         self.profit = profit
         self.win_rate = win_rate
-        self.max_consec_loss = max_consec_loss,
-        self.max_drawdown = max_drawdown,
+        self.max_consec_loss = max_consec_loss
+        self.max_drawdown = max_drawdown
+        self.max_loss_count = max_loss_count
         self.real_profit_loss_ratio = real_profit_loss_ratio
 
+    def is_better_than(self, a: 'BacktestResult') -> bool:
+        is_profit_better = self.profit > a.profit
+        is_max_drawdown_better = self.max_drawdown < a.max_drawdown
+        is_profit_ratio_better = self.real_profit_loss_ratio > a.real_profit_loss_ratio
+        
+        if is_profit_better:
+            return True
+        elif self.profit == a.profit:
+            if is_max_drawdown_better:
+                return True
+            elif self.max_drawdown == a.max_drawdown:
+                if is_profit_ratio_better:
+                    return True
+        else:
+            return False
+        
 
-def run_backtest(period: str, time_step: int, model: Sequential = None) -> BacktestResult:
-    # 回测数据
-    df = process_full(period, "backtest")
-    # 模型
-    if not model:
-        model = load_model(f"./model/lstm_ohlc_{period}_{time_step}.keras")
-    # 归一化器
-    with open(f"./scaler/scaler_x_{period}.pkl", "rb") as f:
-        scaler_x = pickle.load(f)
-    with open(f"./scaler/scaler_y_{period}.pkl", "rb") as f:
-        scaler_y = pickle.load(f)
+
+def print_backtest_result(result: BacktestResult, args: TrainArgs):
+    print('=========模型参数==========')
+    print(f"时间步：         {args.time_step}")
+    print(f"训练神经元数：    {args.hidden_size}")
+    print(f"学习率：         {args.learning_rate * 100}%")
+    print(f"dropout:        {args.dropout:.2f}")
+    print(f"batch_size:     {args.batch_size}")
+    print(f"epoch:         {args.epoch}")
+    print('=========回测结果==========')
+    print(f"总交易次数：{result.total}")
+    print(f"胜率：{result.win_rate:.2f}%")
+    print(f"最大连续亏损：{result.max_consec_loss} 笔")
+    print(f"触及最大亏损限制次数：{result.max_loss_count}")
+    print(f"最大回撤：{result.max_drawdown:.2f}")
+    print(f"总收益：{result.profit:.2f}")
+    print(f"实际平均盈亏比：{result.real_profit_loss_ratio:.2f}")
+
+def getInput(args: TrainArgs, df: pd.DataFrame):
     # 用于预测的数据，与训练数据格式一致
     data = df[FEATURES].values
+    scaler_x = get_scaler(args, 'x')
     scaled = scaler_x.transform(data)
+    step = args.time_step
+    start = step
+    end = len(scaled) - 2
+    indices = range(start, end)
+    X_all = []
+    for i in indices:
+        seq = scaled[i - step: i]
+        X_all.append(seq)
+
+    X_all = np.array(X_all)  # shape: (n_samples, step, n_features)
+
+    return (X_all, indices)
+
+def run_backtest(args: TrainArgs, trade_args: TradeArgs, model: Sequential = None) -> BacktestResult:
+    print('===============================================')
+    print('===================开始回测=====================')
+    print('===============================================')
+    print_trade_args(trade_args)
+    # 回测数据
+    df = process_full(args.period, "backtest")
+    # 模型
+    if not model:
+        model = load_model(get_model_url(args))
+
     trades = []
-    # 做多信号
-    prob_long = 0.52
-    prob_short = 1 - prob_long
     # 记录盈利，用于计算回撤
     balance_history = []
     current_balance = 0
     # 记录最大连续亏损
     consec_loss = 0
     max_consec_loss = 0
-    # 单日最大亏损
-    max_loss_atr = 1
-    # 止盈atr比例
-    tp_atr = 1.8
-    # 止损atr比例
-    sl_atr = 0.9
-
-
+    # 记录最大亏损次数
+    max_loss_count = 0
 
     # ===================== 批量构造所有序列 =====================
-    start = time_step
-    end = len(scaled) - 2
-    indices = range(start, end)
-    X_all = []
-    for i in indices:
-        seq = scaled[i - time_step: i]
-        X_all.append(seq)
-
-    X_all = np.array(X_all)  # shape: (n_samples, time_step, n_features)
+    X_all, indices = getInput(args, df)
 
     # ===================== 批量一次性预测 =====================
-    preds_scaled = model.predict(X_all, batch_size=128, verbose=1)
-    preds = scaler_y.inverse_transform(preds_scaled)
+    preds = model.predict(X_all, batch_size=128, verbose=1)
 
     # ===================== 遍历结果执行回测 =====================
     for idx, i in tqdm(enumerate(indices), total=len(indices), desc="回测中"):
@@ -88,53 +125,51 @@ def run_backtest(period: str, time_step: int, model: Sequential = None) -> Backt
         next_c = row['next_c']
         next_h = row['next_h']
         next_l = row['next_l']
-    
-        is_trade = False
+        side = ''
         profit = 0
 
-        
-        if prob > prob_long and close > ma20:
+        if prob > trade_args.long and close > ma20:
             entry = close + SPREAD + SLIPPAGE
-            tp = entry + atr * tp_atr
-            sl = entry - atr * sl_atr
-            max_loss = atr * max_loss_atr
+            tp = entry + atr * trade_args.tp_atr
+            sl = entry - atr * trade_args.sl_atr
+            max_loss = atr * trade_args.max_sl_atr
             # 触发止盈 -> 止盈
             if next_h >= tp:
                 profit = tp - entry
             # 没止盈：拿到收盘，以收盘价来结算，有最大亏损限制
             else:
-                profit = max(next_c - entry, -max_loss)
+                profit = next_c - entry
+                if profit < -max_loss:
+                    profit = -max_loss
+                    max_loss_count += 1
 
-            is_trade = True
-            trades.append({
-                "type": "long",
-                "profit": profit,
-                "tp": tp,
-                "sl": sl,
-            })
+            side = 'long'
         
-        elif prob < prob_short and close < ma20:
+        elif prob < trade_args.short and close < ma20:
             entry = close - SPREAD - SLIPPAGE
-            tp = entry - atr * tp_atr
-            sl = entry + atr * sl_atr
-            max_loss = atr * max_loss_atr
+            tp = entry - atr * trade_args.tp_atr
+            sl = entry + atr * trade_args.sl_atr
+            max_loss = atr * trade_args.max_sl_atr
 
             # 触发止盈 -> 止盈
             if next_l <= tp:
                 profit = entry - tp
             else:
-                profit = max(entry - next_c, -max_loss)
+                profit = entry - next_c
+                if profit < -max_loss:
+                    profit = -max_loss
+                    max_loss_count += 1
 
-            is_trade = True
+            side = 'short'
+
+        # 统计最大连续亏损
+        if side != '':
             trades.append({
-                "type": "short",
+                "type": side,
                 "profit": profit,
                 "tp": tp,
                 "sl": sl,
             })
-
-        # 统计最大连续亏损
-        if is_trade:
             if profit < 0:
                 consec_loss += 1
                 if consec_loss > max_consec_loss:
@@ -154,7 +189,8 @@ def run_backtest(period: str, time_step: int, model: Sequential = None) -> Backt
             win_rate = 0,
             max_consec_loss = 0,
             max_drawdown = 0,
-            real_profit_loss_ratio = 0
+            max_loss_count=0,
+            real_profit_loss_ratio = 0,
         )
     
     # 计算最大回撤
@@ -168,8 +204,6 @@ def run_backtest(period: str, time_step: int, model: Sequential = None) -> Backt
     total_trades = len(tdf)
     # 盈利次数
     win_trades = (tdf['profit'] > 0).sum()
-    # 亏损次数
-    lose_trades = (tdf['profit'] < 0).sum()
     # 胜率
     win_rate = win_trades / total_trades * 100 if total_trades > 0 else 0
     # 总盈利
@@ -181,27 +215,46 @@ def run_backtest(period: str, time_step: int, model: Sequential = None) -> Backt
     # 实际盈亏比
     real_profit_loss_ratio = avg_win / avg_loss
 
-
-    print("===== 回测结果 =====")
-    print(f"总交易次数(盈利/亏损)：{total_trades}({win_trades}/{lose_trades})")
-    print(f"胜率：{win_rate:.2f}%")
-    print(f"最大连续亏损：{max_consec_loss} 笔")
-    print(f"最大回撤：{max_drawdown:.2f}")
-    print(f"总收益：{total_profit:.2f}")
-    print(f"实际平均盈亏比：{real_profit_loss_ratio:.2f}")
-    print(f"理论盈亏比: {tp_atr}/{sl_atr}={tp_atr/sl_atr:.2f}")
-    print(f'最大亏损限制：{max_loss_atr}倍atr')
-
-    return BacktestResult(
+    result = BacktestResult(
         total = total_trades,
         profit = total_profit,
         win_rate = win_rate,
         max_consec_loss = max_consec_loss,
+        max_loss_count=max_loss_count,
         max_drawdown = max_drawdown,
-        real_profit_loss_ratio = real_profit_loss_ratio
+        real_profit_loss_ratio = real_profit_loss_ratio,
     )
+
+    print_backtest_result(result, args)
+    
+
+    return result
+
+def find_best_trade_stregety(train_args: TrainArgs, model: Sequential = None):
+    best_result = BacktestResult()
+    best_trade_args = TradeArgs()
+    counter = 0
+    finished = False
+    while not finished:
+        trade_args = get_trade_args(counter)
+        counter += 1
+
+        # 若交易参数组合已都遍历完毕，则结束测试循环
+        if trade_args is None:
+            finished = True
+            break
+
+        result: BacktestResult = run_backtest(train_args, trade_args, model)
+
+        # 测试结果更好，保存更优结果及参数
+        if (result.is_better_than(best_result)):
+            best_result = result
+            best_trade_args = trade_args
+
+    return (best_result, best_trade_args)
+        
 
 
 if __name__ == "__main__":
     args = get_args()
-    run_backtest(args.period, args.step)
+    find_best_trade_stregety(args)

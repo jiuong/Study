@@ -22,8 +22,28 @@ SLIPPAGE = 0.02
 # 特征列
 FEATURES = [
     "open", "high", "low", "close", "volume",
-    "ma20", "rsi", "macd", "atr", "vol_ma20", "vol_ratio"
+    "ma20", "rsi", "macd", "atr", "vol_ma20", "vol_ratio",
+    # "fib_618", "fib_500", "fib_382"
 ]
 
 # 预测目标列
-TARGETS = ["next_o", "next_h", "next_l", "next_c"]
+TARGETS = ['prob']
+
+# 交易策略
+# 多空入场判断
+PROB_PAIRS = [
+  [0.52, 0.48],
+  [0.56, 0.44],
+  [0.6, 0.4],
+]
+# 止盈止损
+TP_SL_ATR_PAIRS = [
+  [1.8, 0.9],
+  [1.5, 1],
+  [1.0, 1.0],
+]
+# 单日最大亏损限制
+MAX_SL_ATR_LIST = [2.4, 1.8, 1.0]
+# 斐波那契点位区间
+FIBO_POSITION_LIST = [[0.382, 0.618], [0.382, 0.500], [0.500, 0.618]]
+

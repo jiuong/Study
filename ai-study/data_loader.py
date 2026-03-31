@@ -2,6 +2,7 @@
 数据加载、清洗、指标计算
 """
 import pandas as pd
+from indicators.fibo import add_fib_by_pivots
 
 
 def load_data(period: str, type: str) -> pd.DataFrame:
@@ -13,8 +14,6 @@ def load_data(period: str, type: str) -> pd.DataFrame:
     df['prob'] = (df['close'].shift(-1) > df['close']).astype(int)
     return df
 
-import pandas as pd
-
 def clean_gap_data(df, period) -> pd.DataFrame:
     """
     清洗K线数据的时间断层
@@ -24,7 +23,6 @@ def clean_gap_data(df, period) -> pd.DataFrame:
     """
     # 1. 确保时间列是 datetime 并排序
     df = df.copy()
-    print(df.columns)
     df["datetime"] = pd.to_datetime(df["datetime"])
     df = df.sort_values("datetime").reset_index(drop=True)
 
@@ -69,8 +67,6 @@ def clean_gap_data(df, period) -> pd.DataFrame:
     df = df.reset_index()
     return df
 
-
-
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     c = df["close"]
     h = df["high"]
@@ -104,6 +100,7 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # 成交量
     df['vol_ma20'] = df['volume'].rolling(20).mean()
     df['vol_ratio'] = df['volume'] / df['vol_ma20']
+    # df = add_fib_by_pivots(df)
 
     df = df.dropna().reset_index(drop=True)
     return df
